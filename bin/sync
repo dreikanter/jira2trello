@@ -1,0 +1,21 @@
+#!/usr/bin/env ruby
+
+require 'trello'
+require 'jira-ruby'
+require 'dotenv'
+require 'logger'
+
+Dotenv.load
+
+logger = Logger.new($stdout)
+
+Trello.configure do |config|
+  config.developer_public_key = ENV['TRELLO_PUBLIC_KEY']
+  config.member_token = ENV['TRELLO_MEMBER_TOKEN']
+end
+
+me = Trello::Member.find(ENV['TRELLO_USER'])
+
+me.boards.each do |board|
+  puts board.name
+end
