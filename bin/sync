@@ -6,6 +6,7 @@ require 'dotenv'
 require 'logger'
 require 'pry'
 require 'awesome_print'
+require 'uri'
 
 Dotenv.load
 
@@ -16,7 +17,6 @@ REQUIREN_ENV_VARS = %w(
   TRELLO_MEMBER_TOKEN
   TRELLO_USER
   TRELLO_BOARD_URL
-  TRELLO_LIST_NAME
   JIRA_USERNAME
   JIRA_PASSWORD
   JIRA_SITE
@@ -30,48 +30,151 @@ unless undefined_vars.empty?
   abort "Undefined environment variables: #{undefined_vars.join(', ')}"
 end
 
+class JiraBrowser
+  JIRA_ISSUE_TYPE = 'Epic'
+  JIRA_EPIC_TAGS = %w(trello test)
+  JIRA_EPIC_NAME_FIELD = 'customfield_10005'
+
+  def initialize(options = {})
+    @client = JIRA::Client.new({context_path: '',
+      auth_type: :basic}.merge(options))
+    @project_key = options[:project_key]
+  end
+
+  def create_epic(options = {})
+    issue = @client.Issue.build
+    issue.save({
+      'fields' => {
+        'project' => { 'id' => project.id },
+        'issuetype' => { 'id' => epic_issue_type_id },
+        'summary' => options[:summary],
+        'description' => options[:description],
+        JIRA_EPIC_NAME_FIELD => options[:epic_name],
+        'labels' => options[:labels]
+      }
+    })
+    issue
+  end
+
+  def epic_subtasks(options = {})
+    @client.Issue.jql("'Epic Link' = '#{options[:epic_key]}' and project = '#{@project_key}'")
+  end
+
+  private
+
+  def project
+    @project ||= @client.Project.find(@project_key)
+  end
+
+  def epic_issue_type_id
+    @epic_issue_type_id ||= begin
+      epic_type = project.issueTypes.find { |t| t['name'] == JIRA_ISSUE_TYPE }
+      epic_type['id']
+    end
+  end
+end
+
 Trello.configure do |config|
   config.developer_public_key = ENV['TRELLO_PUBLIC_KEY']
   config.member_token = ENV['TRELLO_MEMBER_TOKEN']
 end
 
-# Find Trello board
-
 me = Trello::Member.find(ENV['TRELLO_USER'])
 board = me.boards.find { |b| b.url.starts_with? ENV['TRELLO_BOARD_URL'] }
+
 unless board
-  logger.error "Trello board not found: url='#{ENV['TRELLO_BOARD_URL']}"
+  logger.error "trello board not found: url='#{ENV['TRELLO_BOARD_URL']}"
   abort
 end
-logger.info "Trello board found: id=#{board.id} name='#{board.name}'"
 
-# Find Trello list
+logger.info "trello board found: id=#{board.id} name='#{board.name}'"
 
-list = board.lists.find { |l| l.name == ENV['TRELLO_LIST_NAME'] }
-unless list
-  logger.error "Trello list not found: name='#{ENV['TRELLO_LIST_NAME']}'"
-end
-logger.info "Trello list found: id=#{list.id} name='#{list.name}'"
+sync_label = board.labels.find { |l| l.name == ENV['TRELLO_SYNC_LABEL_NAME'] }
 
-# Find or create sync label
-
-label = board.labels.find { |l| l.name == ENV['TRELLO_SYNC_LABEL_NAME'] }
-if label
-  logger.info "sync label found: id=#{label.id} name=#{label.name}"
-else
+unless sync_label
   logger.info "sync label not found; creating a new one"
-  label = Trello::Label.create(name: ENV['TRELLO_SYNC_LABEL_NAME'],
+  sync_label = Trello::Label.create(name: ENV['TRELLO_SYNC_LABEL_NAME'],
     board_id: board.id, color: ENV['TRELLO_SYNC_LABEL_COLOR'])
-  logger.info "sync label created: id=#{label.id} name='#{label.name}'"
 end
 
-# TODO:
-# for each trello card
-# if sync label presents
-#   find attached jira issue
-#   find jira sub-tasks
-#   sync jira subtasks with trello card checklist - "Summary [issue ID]"
-# else
-#   create jira issue
-#   attack jira issue link to trello card - "Jira issue [#{issue ID}]"
-#   attach link to a bug reporting form to the trello card - "Report a bug"
+logger.info "sync label: id=#{sync_label.id} name=#{sync_label.name}"
+
+cards = board.cards
+logger.info "overall cards amount: #{cards.count}"
+
+browser = JiraBrowser.new(
+  username: ENV['JIRA_USERNAME'],
+  password: ENV['JIRA_PASSWORD'],
+  site: ENV['JIRA_SITE'],
+  project_key: ENV['JIRA_PROJECT_KEY']
+)
+
+SUBTASKS_CHECKLIST_NAME = 'Jira subtasks'
+
+cards.each do |card|
+  logger.info "---> card id=#{card.id}"
+
+  logger.info "looking up attached jira issue"
+  attachment = card.attachments.find { |a| a.name.starts_with? 'Jira issue' }
+
+  if attachment
+    epic_key = attachment.url.split('/').last
+  else
+    logger.info "creating new jira issue"
+    epic = browser.create_epic(
+      summary: card.name,
+      description: [card.desc, "Replicated from Trello: #{card.short_url}"].
+        reject(&:empty?).join("\n\n"),
+      epic_name: card.name,
+      labels: %w(trello test)
+    )
+
+    unless card.card_labels.include?(sync_label.id)
+      logger.info "adding sync label to the trello card"
+      card.add_label(sync_label)
+    end
+
+    logger.info "attaching jira issue link"
+    epic_key = epic.key
+    epic_url = URI.join(ENV['JIRA_SITE'], "browse/#{epic_key}").to_s
+    attachment = card.add_attachment(epic_url, "Jira issue #{epic_key}")
+  end
+
+  logger.info "attached jira issue: id=#{epic_key}"
+
+  logger.info "looking up subtasks checklist"
+  checklist = card.checklists.find { |c| c.name == SUBTASKS_CHECKLIST_NAME }
+
+  unless checklist
+    logger.info "subtasks checklist not found; creating new one"
+    checklist = Trello::Checklist.create(
+      name: SUBTASKS_CHECKLIST_NAME,
+      card_id: card.id
+    )
+  end
+
+  logger.info "trello checklist: id=#{checklist.id}"
+
+  logger.info "looking up for jira sub-tasks"
+  subtasks = browser.epic_subtasks(epic_key: epic_key)
+
+  logger.info "syncing jira subtasks with trello checklist"
+  subtasks.each do |issue|
+    logger.info "issue: key='#{issue.key}' status='#{issue.status.name}'"
+    issue_url = URI.join(ENV['JIRA_SITE'], "browse/#{issue.key}").to_s
+
+    item = checklist.items.find { |i| i.name.end_with? " - #{issue_url}" }
+
+    if item
+      state = (issue.status.name == 'Done') ? 'complete' : 'incomplete'
+      unless item.state == state
+        logger.info "updating status for existing item to [#{state}]: id=#{item.id} name='#{item.name}'"
+        checklist.update_item_state(item.id, state)
+      end
+    else
+      logger.info "creating new checklist item"
+      item = checklist.add_item("#{issue.summary} - #{issue_url}", issue.status.name == 'Done')
+      logger.info "checklist item created: id=#{item['id']} name='#{item['name']}' state=#{item['state']}"
+    end
+  end
+end
