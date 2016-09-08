@@ -4,18 +4,74 @@ require 'trello'
 require 'jira-ruby'
 require 'dotenv'
 require 'logger'
+require 'pry'
+require 'awesome_print'
 
 Dotenv.load
 
 logger = Logger.new($stdout)
+
+REQUIREN_ENV_VARS = %w(
+  TRELLO_PUBLIC_KEY
+  TRELLO_MEMBER_TOKEN
+  TRELLO_USER
+  TRELLO_BOARD_URL
+  TRELLO_LIST_NAME
+  JIRA_USERNAME
+  JIRA_PASSWORD
+  JIRA_SITE
+  JIRA_PROJECT_KEY
+  TRELLO_SYNC_LABEL_NAME
+  TRELLO_SYNC_LABEL_COLOR
+).freeze
+
+undefined_vars = REQUIREN_ENV_VARS.reject { |v| ENV.key? v }
+unless undefined_vars.empty?
+  abort "Undefined environment variables: #{undefined_vars.join(', ')}"
+end
 
 Trello.configure do |config|
   config.developer_public_key = ENV['TRELLO_PUBLIC_KEY']
   config.member_token = ENV['TRELLO_MEMBER_TOKEN']
 end
 
-me = Trello::Member.find(ENV['TRELLO_USER'])
+# Find Trello board
 
-me.boards.each do |board|
-  puts board.name
+me = Trello::Member.find(ENV['TRELLO_USER'])
+board = me.boards.find { |b| b.url.starts_with? ENV['TRELLO_BOARD_URL'] }
+unless board
+  logger.error "Trello board not found: url='#{ENV['TRELLO_BOARD_URL']}"
+  abort
 end
+logger.info "Trello board found: id=#{board.id} name='#{board.name}'"
+
+# Find Trello list
+
+list = board.lists.find { |l| l.name == ENV['TRELLO_LIST_NAME'] }
+unless list
+  logger.error "Trello list not found: name='#{ENV['TRELLO_LIST_NAME']}'"
+end
+logger.info "Trello list found: id=#{list.id} name='#{list.name}'"
+
+# Find or create sync label
+
+label = board.labels.find { |l| l.name == ENV['TRELLO_SYNC_LABEL_NAME'] }
+if label
+  logger.info "sync label found: id=#{label.id} name=#{label.name}"
+else
+  logger.info "sync label not found; creating a new one"
+  label = Trello::Label.create(name: ENV['TRELLO_SYNC_LABEL_NAME'],
+    board_id: board.id, color: ENV['TRELLO_SYNC_LABEL_COLOR'])
+  logger.info "sync label created: id=#{label.id} name='#{label.name}'"
+end
+
+# TODO:
+# for each trello card
+# if sync label presents
+#   find attached jira issue
+#   find jira sub-tasks
+#   sync jira subtasks with trello card checklist - "Summary [issue ID]"
+# else
+#   create jira issue
+#   attack jira issue link to trello card - "Jira issue [#{issue ID}]"
+#   attach link to a bug reporting form to the trello card - "Report a bug"
