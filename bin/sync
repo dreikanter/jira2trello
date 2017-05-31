@@ -12,7 +12,7 @@ Dotenv.load
 
 logger = Logger.new($stdout)
 
-REQUIREN_ENV_VARS = %w(
+REQUIRED_ENV_VARS = %w(
   TRELLO_PUBLIC_KEY
   TRELLO_MEMBER_TOKEN
   TRELLO_USER
@@ -25,7 +25,7 @@ REQUIREN_ENV_VARS = %w(
   TRELLO_SYNC_LABEL_COLOR
 ).freeze
 
-undefined_vars = REQUIREN_ENV_VARS.reject { |v| ENV.key? v }
+undefined_vars = REQUIRED_ENV_VARS.reject { |v| ENV.key? v }
 unless undefined_vars.empty?
   abort "Undefined environment variables: #{undefined_vars.join(', ')}"
 end
